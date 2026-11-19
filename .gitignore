@@ -1,0 +1,11 @@
+# ESP-IDF generated files
+/build/
+/managed_components/
+/sdkconfig.old
+/main/boards/esp32-s3n16r8-emoji-bak/merged-binary.bin
+
+# Desktop vision service runtime
+__pycache__/
+*.py[cod]
+.venv/
+MvSDKLog/
