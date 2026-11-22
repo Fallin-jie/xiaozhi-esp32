@@ -526,6 +526,7 @@ elseif(CONFIG_BOARD_TYPE_ESP32S3_SMART_SPEAKER)
 elseif(CONFIG_BOARD_TYPE_ESP32_S3N16R8_EMOJI)
     set(BOARD_TYPE "esp32-s3n16r8-emoji")
     set(BOARD_WEB_PAGE "boards/${BOARD_TYPE}/control_panel.html")
+    set(BOARD_ALERT_SOUND "boards/${BOARD_TYPE}/visitor_alert.ogg")
 endif()
 
 file(GLOB BOARD_SOURCES
@@ -611,7 +612,7 @@ if(CONFIG_IDF_TARGET_ESP32)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${BOARD_ALERT_SOUND}
                     EMBED_TXTFILES ${BOARD_WEB_PAGE}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE

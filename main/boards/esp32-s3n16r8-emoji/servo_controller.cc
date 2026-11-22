@@ -6,9 +6,18 @@
 #include "servo_controller.h"
 #include <esp_log.h>
 #include <esp_random.h>
+#include <nvs.h>
 #include <cmath>
 
 #define TAG "ServoController"
+
+namespace {
+constexpr int kMaxCenterOffset = 15;
+static_assert(SERVO_MIN_X - kMaxCenterOffset >= 0 && SERVO_MAX_X + kMaxCenterOffset <= 180);
+static_assert(SERVO_MIN_Y - kMaxCenterOffset >= 0 && SERVO_MAX_Y + kMaxCenterOffset <= 180);
+constexpr char kMotionNamespace[] = "head_motion";
+constexpr char kCenterKey[] = "center_xy";
+}
 
 ServoController::ServoController() {
 }
@@ -43,6 +52,19 @@ void ServoController::Initialize() {
     }
 
     boot_ = esp_random() | 1U;
+    nvs_handle_t handle;
+    if (nvs_open(kMotionNamespace, NVS_READONLY, &handle) == ESP_OK) {
+        uint16_t centers;
+        if (nvs_get_u16(handle, kCenterKey, &centers) == ESP_OK) {
+            int dx = (centers >> 8) - SERVO_CENTER_X;
+            int dy = (centers & 0xff) - SERVO_CENTER_Y;
+            if (std::abs(dx) <= kMaxCenterOffset && std::abs(dy) <= kMaxCenterOffset) {
+                offset_x_ = dx;
+                offset_y_ = dy;
+            }
+        }
+        nvs_close(handle);
+    }
     WriteAngle(0, output_.x);
     WriteAngle(1, output_.y);
     esp_timer_create_args_t args{};
@@ -68,6 +90,7 @@ bool ServoController::AutoAllowed() const {
 }
 
 void ServoController::WriteAngle(int channel, float angle) {
+    angle += channel == 0 ? offset_x_ : offset_y_;
     float pulse = SERVO_MIN_PULSEWIDTH + angle * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) / 180.f;
     auto duty = std::lround(pulse * ((1 << LEDC_TIMER_BIT_WIDTH) - 1) * LEDC_FREQUENCY / 1000000.f);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, servo_channels[channel], duty));
@@ -107,7 +130,7 @@ void ServoController::Switch(Mode mode) {
     ++epoch_;
     first_ = count_ = 0;
     session_ = 0;
-    target_ = output_;
+    target_ = Limit(output_);
     speed_ = 0;
 }
 void ServoController::Expire(int64_t now) {
@@ -117,10 +140,46 @@ ServoController::Position ServoController::GetPosition() const {
     std::lock_guard lock(mutex_);
     return {int(std::lround(output_.x)), int(std::lround(output_.y)), mode_ == Mode::Manual,
             target_.x, target_.y, mode_ == Mode::Follow ? "follow" : mode_ == Mode::Manual ? "manual" : "auto",
-            boot_, epoch_, output_.x != target_.x || output_.y != target_.y || count_ > 0, manual_speed_};
+            boot_, epoch_, output_.x != target_.x || output_.y != target_.y || count_ > 0, manual_speed_,
+            offset_x_, offset_y_, SERVO_MIN_X, SERVO_MAX_X, SERVO_MIN_Y, SERVO_MAX_Y};
+}
+ServoController::Angles ServoController::Limit(Angles point) {
+    // Travel is measured from the calibrated neutral. WriteAngle translates it to PWM.
+    return {std::clamp(point.x, float(SERVO_MIN_X), float(SERVO_MAX_X)),
+            std::clamp(point.y, float(SERVO_MIN_Y), float(SERVO_MAX_Y))};
+}
+
+esp_err_t ServoController::CalibrateCenter(bool reset, uint32_t boot, uint32_t generation) {
+    std::lock_guard lock(mutex_);
+    if (boot != boot_ || generation != epoch_ || mode_ != Mode::Manual ||
+        output_.x != target_.x || output_.y != target_.y || count_) return ESP_ERR_INVALID_STATE;
+    const int dx = reset ? 0 : offset_x_ + int(std::lround(output_.x)) - SERVO_CENTER_X;
+    const int dy = reset ? 0 : offset_y_ + int(std::lround(output_.y)) - SERVO_CENTER_Y;
+    if (std::abs(dx) > kMaxCenterOffset || std::abs(dy) > kMaxCenterOffset) return ESP_ERR_INVALID_ARG;
+    if (dx == offset_x_ && dy == offset_y_) return ESP_OK;
+
+    nvs_handle_t handle;
+    auto err = nvs_open(kMotionNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    uint16_t centers = ((SERVO_CENTER_X + dx) << 8) | (SERVO_CENTER_Y + dy);
+    err = nvs_set_u16(handle, kCenterKey, centers);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) return err;
+
+    // Rebase the coordinates at rest so saving or resetting never steps the PWM.
+    output_.x += offset_x_ - dx;
+    output_.y += offset_y_ - dy;
+    // Resetting neutral at an old endpoint can leave the head outside the new travel.
+    // Tick brings it to the nearest endpoint under the normal speed limit.
+    target_ = Limit(output_);
+    offset_x_ = dx;
+    offset_y_ = dy;
+    ++epoch_;
+    return ESP_OK;
 }
 bool ServoController::SetManualSpeed(int degrees_per_second) {
-    if (degrees_per_second < 5 || degrees_per_second > 20 || degrees_per_second % 5 != 0) return false;
+    if (degrees_per_second < kMinManualSpeed || degrees_per_second > kMaxManualSpeed) return false;
     std::lock_guard lock(mutex_);
     manual_speed_ = degrees_per_second;
     return true;
@@ -140,8 +199,7 @@ void ServoController::MoveManually(ManualMove move) {
         case ManualMove::Down: target_.y += kManualStep; break;
         case ManualMove::Center: target_ = {SERVO_CENTER_X, SERVO_CENTER_Y}; break;
     }
-    target_.x = std::clamp(target_.x, float(SERVO_MIN_X), float(SERVO_MAX_X));
-    target_.y = std::clamp(target_.y, float(SERVO_MIN_Y), float(SERVO_MAX_Y));
+    target_ = Limit(target_);
     ResetSpeedOnTurn(previous);
 }
 void ServoController::ResetSpeedOnTurn(Angles previous) {
@@ -153,7 +211,7 @@ bool ServoController::ManualAngles(int x, int y) {
     std::lock_guard lock(mutex_);
     if (mode_ != Mode::Manual) Switch(Mode::Manual); else ++epoch_;
     auto previous = target_;
-    target_ = {float(x), float(y)};
+    target_ = Limit({float(x), float(y)});
     ResetSpeedOnTurn(previous);
     return true;
 }
@@ -181,10 +239,10 @@ bool ServoController::UpdateFollow(uint32_t session, uint32_t seq, bool hold, in
     Expire(now);
     if (mode_ != Mode::Follow || session != session_ || seq <= seq_) return false;
     if (x != -1 && !InRange(x, y)) return false;
-    if (hold) { target_ = output_; speed_ = 0; }
+    if (hold) { target_ = Limit(output_); speed_ = 0; }
     else if (x != -1) {
         auto previous = target_;
-        target_ = {float(x), float(y)};
+        target_ = Limit({float(x), float(y)});
         ResetSpeedOnTurn(previous);
     }
     seq_ = seq;
@@ -202,8 +260,7 @@ ServoController::Angles ServoController::Last() const {
     return count_ ? queue_[(first_ + count_ - 1) % queue_.size()] : target_;
 }
 void ServoController::Append(Angles point) {
-    point.x = std::clamp(point.x, float(SERVO_MIN_X), float(SERVO_MAX_X));
-    point.y = std::clamp(point.y, float(SERVO_MIN_Y), float(SERVO_MAX_Y));
+    point = Limit(point);
     auto end = Last();
     if (point.x == end.x && point.y == end.y) return;
     if (!count_ && output_.x == target_.x && output_.y == target_.y) target_ = point;

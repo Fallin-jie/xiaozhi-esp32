@@ -91,7 +91,7 @@ def create_app(service, lan_ip=None, *, chat_only=False):
     def frame(ident):
         try:
             with service.lock:
-                data = service.image(ident, request.args.get("depth") == "1")
+                data = service.image(ident, request.args.get("depth") == "1", mirror=request.args.get("mirror") == "1")
             return Response(data, mimetype="image/jpeg")
         except ValueError:
             abort(410)
@@ -111,6 +111,8 @@ def create_app(service, lan_ip=None, *, chat_only=False):
         if not isinstance(data, dict):
             abort(400)
         try:
+            if op in ("alert_text", "speak"):
+                return jsonify(service.voice_command(op, data))
             with service.lock:
                 result = service.command(op, data)
             return jsonify(result or {"ok": True})

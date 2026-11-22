@@ -3,7 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import threading
 
 from robot import Robot
@@ -16,8 +16,9 @@ import pyrealsense2 as rs
 
 from geometry import aim, fit_samples, marker_pose, measure
 from service import Service
+from speech import DEFAULT_ALERT
 from app import create_app
-from vision import Tracker
+from vision import Detector, Tracker
 
 
 def detection(x, feature=None, z=1.0):
@@ -78,6 +79,190 @@ class FollowTests(unittest.TestCase):
             _, _, status = t.update([detection(.4)], i/5, [[1.,0.]], {})
         self.assertIn("身份待确认",status)
 
+    def test_no_owner_tracks_first_stable_person_with_no_face(self):
+        tracker = Tracker()
+        gate = dict(roi=[.3,0,1,1], range=[.5,2])
+        def see(t, *people):
+            return tracker.update(list(people), t, [], gate)[1:]
+        self.assertIsNone(see(1, detection(.1), detection(.4,z=None))[0])
+        self.assertIsNone(see(1.3, detection(.1), detection(.4))[0])
+        self.assertIsNone(see(1.6, detection(.4), detection(.7))[0])
+        first, status = see(1.9, detection(.4), detection(.7))
+        self.assertEqual(status, "有人进入")
+        self.assertEqual(first["box"][0], .4)
+        self.assertEqual(see(2.2, detection(.7), detection(.42))[0]["id"], first["id"])
+        self.assertIsNone(see(2.4, detection(.7))[0])
+        for t in (2.7,3.1,3.5,3.8):
+            target, status = see(t, detection(.7))
+        self.assertEqual((target["box"][0],status), (.7,"有人进入"))
+        self.assertIsNone(see(4.0, detection(.7,z=3))[0])
+
+    def test_visitor_voice_announces_arrivals_once_without_follow(self):
+        s = Service()
+        s.config = {}
+        s.robot.state = {"robot": "test", "boot": 1, "visitorAlert": 0}
+        f = frame()
+        def observe(t, *detections):
+            snap = dict(f, stamp=f["stamp"] + t)
+            s.process_frame(snap, list(detections))
+            s.announce_visitors(snap["stamp"])
+
+        with patch.object(s.robot, "announce_visitor", side_effect=[False, True, True, True]) as say:
+            person, newcomer = detection(.2), detection(.7)
+            for i in range(3):
+                observe(i*.2, person)
+            say.assert_not_called()
+            for i in range(3, 16):
+                observe(i*.2, person)
+            self.assertEqual(say.call_count, 2)
+            self.assertEqual(say.call_args_list[0], say.call_args_list[1])
+            for i in range(16, 24):
+                observe(i*.2, person, newcomer)
+            self.assertEqual(say.call_count, 3)
+            observe(4.8)
+            for i in range(25, 32):
+                observe(i*.2, person, newcomer)
+            self.assertEqual(say.call_count, 3)
+            observe(10)
+            for i in range(51, 61):
+                observe(i*.2, person, newcomer)
+            self.assertEqual(say.call_count, 4)
+            self.assertIsNone(s.robot.session)
+
+    def test_visitor_voice_obeys_identity_region_distance_and_frame_freshness(self):
+        s = Service()
+        s.config = {"owner": [[1., 0.]]}
+        s.robot.state = {"robot": "test", "boot": 1, "visitorAlert": 0}
+        f = frame()
+        s.process_frame(f, [])
+        s.profile().update(roi=[.4,0,1,1], range=[.5,2])
+        with patch.object(s.robot, "announce_visitor", return_value=True) as say:
+            for i in range(12):
+                snap = dict(f, stamp=f["stamp"] + i*.2)
+                people = [detection(.5, np.array([1.,0.])), detection(.1), detection(.8,z=3)]
+                s.process_frame(snap, people)
+                s.announce_visitors(snap["stamp"])
+            say.assert_not_called()
+            for i in range(6):
+                s.process_frame(dict(f, stamp=f["stamp"]-10+i*.2), [detection(.6, np.array([0.,1.]))])
+            self.assertTrue(s.tracker.visitors)
+            s.announce_visitors(time.monotonic())
+            say.assert_not_called()
+
+    def test_saved_alert_survives_restart_and_manual_text_plays_separately(self):
+        with tempfile.TemporaryDirectory() as folder, patch("service.DATA", Path(folder)):
+            s = Service()
+            s.robot.address = "127.0.0.1"
+            s.robot.state = {"robot": "test", "boot": 3, "textVoice": True, "visitorAlert": 0}
+            client = create_app(s).test_client()
+            def submit(op, value):
+                return client.post("/api/" + op, json={"text": value}, headers={"X-Desk-Control": "1"})
+            with patch("service.synthesize", side_effect=lambda t: t.encode()), patch("service.play_voice") as play:
+                for invalid in ("   ", "长" * 201, None):
+                    self.assertEqual(submit("alert_text", invalid).status_code, 400)
+                self.assertEqual(submit("alert_text", "门口有访客").status_code, 200)
+                play.assert_not_called()
+                restored = Service()
+                self.assertEqual(restored.state()["alert_text"], "门口有访客")
+                self.assertEqual(restored.visitor_clip, "门口有访客".encode())
+                self.assertEqual(submit("speak", "你好").status_code, 200)
+                self.assertEqual(play.call_args.args[3:], ("manual", "你好".encode()))
+                f = frame()
+                for i in range(8):
+                    now = f["stamp"] + i * .2
+                    s.process_frame(dict(f, stamp=now), [detection(.4)])
+                    s.announce_visitors(now)
+                self.assertEqual(play.call_count, 2)
+                self.assertEqual(play.call_args.args[3:], ("visitor", restored.visitor_clip))
+                with patch.object(s, "save", side_effect=OSError("disk")):
+                    self.assertEqual(submit("alert_text", "新词").status_code, 400)
+                self.assertEqual(s.state()["alert_text"], "门口有访客")
+                self.assertEqual(submit("alert_text", DEFAULT_ALERT).status_code, 200)
+                self.assertEqual(Service().visitor_clip, b"")
+
+    def test_voice_transport_failure_preserves_follow_session(self):
+        r = Robot()
+        r.state = {"boot": 1, "robot": "test"}
+        r.session = 77
+        with patch.object(r, "_request", side_effect=TimeoutError):
+            self.assertFalse(r.announce_visitor(12))
+        self.assertEqual(r.session, 77)
+
+    def test_no_owner_generates_angles_without_calibration(self):
+        s = Service()
+        s.config = {}
+        s.robot.state = {"robot":"test"}
+        f = frame()
+        stamp = f["stamp"]
+        for idx, x in enumerate((.1,.1,.1,.12,.16,.2)):
+            f = dict(f, stamp=stamp+idx*.25)
+            s.process_frame(f, [detection(x, z=None)])
+            if idx == 2:
+                initial_x = s.history[-1]["angles"][0]
+        snap = s.history[-1]
+        self.assertEqual(snap["status"], "有人进入")
+        self.assertEqual(snap["method"], "画面方向（估算）")
+        self.assertGreater(initial_x, snap["angles"][0])
+        self.assertGreater(snap["angles"][0], 90)
+        # Replay a target at symmetric offsets from the optical center, at the same height.
+        for pixel, expected in ((170,[107,86]), (320,[90,85]), (470,[73,86])):
+            self.assertEqual(aim(f, {}, [pixel/639,200/479], None, camera_direction=True)[0], expected)
+        self.assertEqual(aim(f, {}, [1,1], None, camera_direction=True)[0][1], 110)
+        self.assertIsNone(aim(f, {}, [.2,.4], None)[0])
+        partial = {"regions":{"seat":{"rect":[0,0,.5,.5],"samples":[]}}}
+        self.assertIsNone(aim(f, partial, [.2,.4], None, camera_direction=True)[0])
+        s.process_frame(dict(f, stamp=f["stamp"]+.2), [])
+        self.assertIsNone(s.history[-1]["angles"])
+
+    def test_stranger_replaces_owner_in_same_box(self):
+        tracker = Tracker()
+        owner = np.array([1., 0.])
+        other = np.array([0., 1.])
+        def observe(t, feature):
+            return tracker.update([detection(.3, feature)], t, [owner.tolist()], {})
+        self.assertEqual(observe(1, owner)[2], "主人")
+        self.assertEqual(observe(1.1, None)[2], "主人")
+        self.assertEqual(observe(1.2, other)[0][0]["role"], "待确认")
+        observe(1.3, None)
+        observe(1.4, other)
+        self.assertEqual(observe(1.5, other)[0][0]["role"], "待确认")
+        self.assertEqual(observe(1.6, other)[0][0]["role"], "其他人")
+        observe(1.9, other)
+        self.assertEqual(observe(2.2, other)[2], "有人进入")
+        self.assertEqual(observe(2.3, owner)[2], "主人")
+        self.assertEqual(observe(3.1, None)[0][0]["role"], "待确认")
+
+    def test_two_faces_in_one_body_cannot_enroll_or_alert(self):
+        detector = Detector.__new__(Detector)
+        detector.bodies = Mock(return_value=[[.1, .1, .8, .95]])
+        detector.face, detector.recognizer = Mock(), Mock()
+        # The smaller face still makes this body ambiguous.
+        faces = np.zeros((2, 15), dtype=np.float32)
+        faces[:, :4] = [[100, 70, 80, 82], [230, 90, 28, 30]]
+        detector.face.detect.return_value = None, faces
+        items = detector.detect(frame()["bgr"], None)
+        detector.recognizer.feature.assert_not_called()
+        tracks, target, _ = Tracker().update(items, 1, [[1., 0.]], {})
+        self.assertTrue(tracks[0]["ambiguous"])
+        self.assertIsNone(target)
+
+    def test_enroll_only_the_person_in_the_displayed_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s = Service()
+            s.config = {}
+            s.path = Path(directory)/"settings.json"
+            s.process_frame(frame(), [detection(.1, np.array([1.,0.])), detection(.6, np.array([0.,1.]))])
+            ident = s.counter
+            with self.assertRaisesRegex(ValueError, "多人"):
+                s.command("enroll", {"frame":ident})
+            s.command("enroll", {"frame":ident, "uv":[.15,.4]})
+            s.process_frame(frame(), [detection(.6, np.array([0.,1.]))])
+            with self.assertRaisesRegex(ValueError, "不匹配"):
+                s.command("enroll", {"frame":s.counter})
+            s.process_frame(frame(), [detection(.1, np.array([.96,.28]))])
+            s.command("enroll", {"frame":s.counter})
+            self.assertEqual(s.state()["owner"], 2)
+
     def test_multiple_visitors_and_crossing(self):
         tracker = Tracker()
         owner = np.array([1.,0.])
@@ -122,6 +307,54 @@ class FollowTests(unittest.TestCase):
         pose = marker_pose(f,dict(size=80,marker=9,right=0,forward=0,up=0,yaw=0))
         self.assertLess(pose["rms"],1.)
         self.assertAlmostEqual(pose["pivot"][2],.25,places=2)
+
+    def test_calibrated_center_respects_existing_2d_samples_and_limits(self):
+        p = dict(regions={"seat":dict(rect=[0,0,1,1], matrix=[[0,0],[0,0],[125,90]])})
+        robot = dict(centerOffsetX=8,centerOffsetY=-4,minX=50,maxX=122,minY=74,maxY=110)
+        self.assertEqual(aim(frame(), p, [.5,.5], None, robot=robot), ([117,94],"二维",False))
+        p["regions"]["seat"]["matrix"][2][0] = 135
+        self.assertEqual(aim(frame(), p, [.5,.5], None, robot=robot), ([122,94],"二维",True))
+
+    def test_center_calibration_uses_displayed_generation_and_requires_manual_rest(self):
+        s = Service()
+        st = dict(x=93,y=89,boot=42,generation=7,mode="manual",moving=False,centerOffsetX=0,centerOffsetY=0)
+        s.robot.state = st
+        seen = dict(boot=42,generation=7)
+        with patch.object(s.robot,"call") as call:
+            s.command("save_center", seen)
+            call.assert_called_once_with("save_center", **seen)
+            for change in (dict(mode="auto"),dict(moving=True),dict(generation=8),dict(x=108)):
+                s.robot.state = dict(st, **change)
+                with self.assertRaises(ValueError):
+                    s.command("save_center", seen)
+            call.assert_called_once()
+
+    def test_manual_speed_accepts_integer_range_and_legacy_presets(self):
+        service = Service()
+        client = create_app(service).test_client()
+        def submit(value):
+            return client.post("/api/speed", json={"value": value}, headers={"X-Desk-Control": "1"})
+
+        service.robot.state = dict(manualSpeed=10, manualSpeedMin=1, manualSpeedMax=120)
+        with patch.object(service.robot, "call") as call:
+            for speed in (1, 13, 47, 120):
+                call.return_value = dict(service.robot.state, manualSpeed=speed)
+                self.assertEqual(submit(speed).get_json(), {"robot": call.return_value})
+                call.assert_called_with("speed", value=speed)
+            call.reset_mock()
+            for invalid in (0, 121, 3.5, True, "17", None):
+                self.assertEqual(submit(invalid).status_code, 400)
+            service.robot.state = dict(manualSpeed=15)
+            self.assertEqual(submit(12).status_code, 400)
+            call.assert_not_called()
+            for speed in (5, 10, 15, 20):
+                call.return_value = dict(manualSpeed=speed)
+                self.assertEqual(submit(speed).status_code, 200)
+                call.assert_called_with("speed", value=speed)
+            service.robot.state = {}
+            call.reset_mock()
+            self.assertEqual(submit(10).status_code, 400)
+            call.assert_not_called()
 
     def test_command_rate_hold_and_lease_loss(self):
         calls = []
@@ -195,6 +428,28 @@ class FollowTests(unittest.TestCase):
         self.assertEqual(client.get("/", base_url="http://unknown.test", environ_overrides=peer).status_code, 403)
         self.assertEqual(client.get("/", base_url=url, environ_overrides={"REMOTE_ADDR": "203.0.113.1"}).status_code, 403)
         self.assertEqual(client.post("/api/start", base_url=url, environ_overrides=peer, json={}).status_code, 403)
+
+    def test_mirrored_preview_preserves_depth_and_box_alignment(self):
+        s = Service()
+        s.config = {}
+        f = frame()
+        f["bgr"][:, :160] = [10,60,220]
+        f["z"][:] = 0
+        f["z"][:, :160] = .3
+        s.process_frame(f, [detection(.1)])
+        client = create_app(s).test_client()
+        for depth in (0,1):
+            def preview(mirror):
+                path = f"/api/frame/{s.counter}?depth={depth}&mirror={mirror}"
+                jpg = client.get(path).data
+                return cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            native, mirrored = preview(0), preview(1)
+            np.testing.assert_allclose(mirrored[300,550], native[300,89], atol=5)
+            self.assertGreater(int(mirrored[300,550].max()), 80)
+            self.assertLess(int(mirrored[300,89].max()), 8)
+            # The body's left edge in the sensor frame is its right edge in the preview.
+            np.testing.assert_allclose(mirrored[280,575], native[280,64], atol=22)
+            self.assertGreater(int(mirrored[280,575,1]), 145)
 
     def test_web_freeze_profile_and_expiry(self):
         with tempfile.TemporaryDirectory() as directory:

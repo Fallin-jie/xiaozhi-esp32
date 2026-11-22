@@ -5,6 +5,10 @@ from geometry import in_rect, measure
 from models import paths
 
 
+OWNER_COSINE = .40
+OTHER_COSINE = .27
+
+
 def overlap(a, b):
     w = max(0, min(a[2], b[2]) - max(a[0], b[0]))
     h = max(0, min(a[3], b[3]) - max(a[1], b[1]))
@@ -51,7 +55,7 @@ class Detector:
         small = cv2.resize(image, (round(w*scale), round(h*scale)))
         self.face.setInputSize((small.shape[1], small.shape[0]))
         _, faces = self.face.detect(small)
-        features = {}
+        face_matches = {}
         if faces is not None:
             for face in faces:
                 face = face.copy()
@@ -62,24 +66,31 @@ class Detector:
                 if not matches:
                     boxes.append(np.clip([(x-fw*.6)/w, y/h, (x+fw*1.6)/w, (y+fh*3.5)/h], 0, 1).tolist())
                     matches = [len(boxes)-1]
-                if len(matches) == 1 and fw >= 36:
+                for i in matches:
+                    face_matches.setdefault(i, []).append(face if len(matches) == 1 else None)
+        detected = []
+        for i, (x1, y1, x2, y2) in enumerate(boxes):
+            candidates = face_matches.get(i, [])
+            face = candidates[0] if len(candidates) == 1 else None
+            feature = face_box = None
+            if face is not None:
+                x, y, fw, fh = face[:4]
+                face_box = np.clip([x/w, y/h, (x+fw)/w, (y+fh)/h], 0, 1).tolist()
+                if fw >= 36:
                     crop = self.recognizer.alignCrop(image, face)
                     feature = self.recognizer.feature(crop).flatten()
                     feature /= max(np.linalg.norm(feature), 1e-8)
-                    # Multiple faces in one body box cannot establish an identity.
-                    i = matches[0]
-                    features[i] = None if i in features else feature
-        detected = []
-        for i, (x1, y1, x2, y2) in enumerate(boxes):
             uv = [(x1+x2)/2, y1 + .30*(y2-y1)]
             depth, ratio, _ = measure(z, uv, ((x2-x1)*.12, (y2-y1)*.07))
-            detected.append(dict(box=[x1,y1,x2,y2], uv=uv, feature=features.get(i), z=depth, valid=ratio))
+            detected.append(dict(box=[x1,y1,x2,y2], uv=uv, feature=feature, face_box=face_box,
+                                 face_conflict=bool(candidates) and face is None, z=depth, valid=ratio))
         return detected
 
 
 class Tracker:
     def __init__(self):
         self.tracks = {}
+        self.visitors = []
         self.next_id = 1
         self.selected = None
         self.selected_at = 0
@@ -103,27 +114,29 @@ class Tracker:
                 self.tracks[i] = dict(id=i, role="待确认", votes=0, since=None, last_z=None,
                                       seen=now, visitor=False, ambiguous=False)
             t = self.tracks[i]
-            ambiguous = any(j != idx and overlap(d["box"], item["box"]) > .35
+            ambiguous = d.get("face_conflict", False) or any(j != idx and overlap(d["box"], item["box"]) > .35
                             for j, item in enumerate(detections))
             associations = [score for score, j, _ in pairs if j == idx and score >= .25]
             if len(associations) > 1 and associations[0] - associations[1] < .16:
                 ambiguous = True
-            if ambiguous or t["ambiguous"]:
+            if ambiguous or t["ambiguous"] or now-t["seen"] > .5:
                 t.update(role="待确认", votes=0, visitor=False, since=None)
-            if now-t["seen"] > .5:
-                t["since"] = None
             t.update(d, seen=now, ambiguous=ambiguous)
             f = t["feature"]
             if owner and f is not None and not ambiguous:
                 similarity = float(np.max(np.asarray(owner) @ f))
-                if similarity >= .40:
+                if similarity >= OWNER_COSINE:
                     t.update(role="主人", votes=0, visitor=False)
-                elif similarity < .27 and t["role"] != "主人":
+                elif similarity < OTHER_COSINE:
+                    if t["role"] == "主人":
+                        t["role"] = "待确认"
                     t["votes"] += 1
                     if t["votes"] >= 3:
                         t["role"] = "其他人"
                 else:
                     t["votes"] = 0
+            else:
+                t["votes"] = 0
             if t["z"] is not None:
                 previous = t["last_z"]
                 t["last_z"] = t["z"]
@@ -133,7 +146,7 @@ class Tracker:
         owners = [t for t in visible if t["role"] == "主人"]
         visitors = []
         for t in visible:
-            if t["role"] != "主人" and (owners or t["role"] == "其他人") and not t["ambiguous"]:
+            if not t["ambiguous"] and t["role"] != "主人" and (not owner or owners or t["role"] == "其他人"):
                 t["visitor"] = True
             inside = in_rect(t["uv"], profile.get("roi", [0,0,1,1]))
             gate = profile.get("range")
@@ -146,8 +159,16 @@ class Tracker:
                     visitors.append(t)
             else:
                 t["since"] = None
+        self.visitors = []
         if any(t["ambiguous"] for t in visible) or len(owners) > 1:
             return visible, None, "人物交叉，等待确认"
+        for t in visitors:
+            # Keep the announcement through short gaps in depth or identification.
+            if now - t.get("last_visit", -float("inf")) > 3:
+                t.pop("voice_request", None)
+                t["announced"] = False
+            t["last_visit"] = now
+        self.visitors = visitors
         previous = next((t for t in visible if t["id"] == self.selected), None)
         old_visitor = self.tracks.get(self.selected, {}).get("visitor", False)
         if not previous and now-self.selected_at <= 1.5 and self.selected is not None and (old_visitor or not visitors):

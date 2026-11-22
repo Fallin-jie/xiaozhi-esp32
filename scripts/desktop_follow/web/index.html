@@ -10,30 +10,45 @@
 <aside><nav aria-label="控制页签"><button data-tab="setup" class="active">设备与跟随</button><button data-tab="cal">位置标定</button></nav>
 <div id="setup" class="tab"><h3>设备连接</h3><label>机器人局域网 IP<div class="row"><input id="address" placeholder="192.168.31.67" inputmode="decimal"><button id="connect">连接</button></div></label>
 <label>相机序列号<div class="row"><select id="serial"><option value="">自动选择 RealSense D405</option></select><button id="camera">重连</button></div></label><p id="stream"></p><hr>
-<h3>主人与提醒区域</h3><p>定格画面，点选自己的身体框，分别录入正脸和轻微侧脸。</p><div class="row"><button id="enroll">录入选中的人</button><button id="delete_owner">清除主人</button></div><p id="owner"></p>
-<div class="row"><button id="roi">使用框选区域</button><button id="whole">全画面提醒</button></div><label>提醒距离（米，可选）<div class="row"><input id="near" type="number" step=".1" min=".01" placeholder="近界"><input id="far" type="number" step=".1" min=".01" placeholder="远界"><button id="range">保存</button></div></label><p id="gate"></p></div>
+<h3>主人与提醒区域</h3><p>绿框表示人脸清晰可录入。只有你一人时可直接录入；画面中有多人时，先点击自己的身体框。</p><div class="row"><button id="enroll">录入我的人脸</button><button id="delete_owner">清除主人</button></div><p id="owner"></p>
+<p id="direction-hint" hidden>试跟随时，请将相机固定在底座旁，朝向与云台回中方向一致。云台按画面方向估算转角。</p>
+<div class="row"><button id="roi">使用框选区域</button><button id="whole">全画面提醒</button></div><label>提醒距离（米，可选）<div class="row"><input id="near" type="number" step=".1" min=".01" placeholder="近界"><input id="far" type="number" step=".1" min=".01" placeholder="远界"><button id="range">保存</button></div></label><p id="gate"></p><hr>
+<section id="voice" aria-labelledby="voice-title"><h3 id="voice-title">语音播报</h3>
+  <form id="alert-form"><label for="alert-text">陌生人提醒词</label>
+    <div class="voice-row"><input id="alert-text" maxlength="200" required><button type="submit">保存提醒词</button></div>
+    <output id="alert-result" aria-live="polite"></output>
+  </form>
+  <form id="speak-form"><label for="speak-text">手动播报</label>
+    <div class="voice-row"><input id="speak-text" placeholder="输入要机器人朗读的文字" maxlength="200" required><button type="submit">播放语音</button></div>
+    <output id="speak-result" aria-live="polite"></output>
+  </form>
+</section></div>
 <div id="cal" class="tab" hidden>
   <div class="servo-heading"><h3>舵机微调</h3><span id="motion-state">等待读取</span></div>
   <button id="servo-map" type="button" class="servo-map" disabled aria-label="点选舵机目标位置，按回车或空格回中" aria-describedby="servo-hint">
     <span class="servo-travel" id="servo-travel" aria-hidden="true">
+      <i id="servo-center-x" hidden></i><i id="servo-center-y" hidden></i>
       <i id="servo-goal" hidden></i>
       <i id="servo-head" hidden></i>
     </span>
     <span id="servo-wait">等待机器人连接</span>
   </button>
-  <p id="servo-hint">点击网格设定目标，十字中心为回中位置。</p>
+  <p id="servo-hint">十字线交点是已设正中。点击网格设定目标，按「回中」回到交点。</p>
+  <p id="servo-range" hidden></p>
   <output id="servo-error" aria-live="polite" hidden></output>
   <div class="servo-readout" aria-label="舵机指令角，先水平后垂直">
     <div><small>当前 · 水平 / 垂直</small><strong id="servo-current">—</strong></div>
     <div><small>目标 · 水平 / 垂直</small><strong id="servo-target">—</strong></div>
   </div>
-  <label class="servo-speed" for="manual-speed">手动速度
-    <select id="manual-speed" disabled>
-      <option value="" disabled>等待读取</option><option value="5">5°/秒</option><option value="10">10°/秒</option>
-      <option value="15">15°/秒</option><option value="20">20°/秒</option>
-    </select>
-  </label>
-  <div class="pad"><button data-dy="-1">上 1°</button><button data-dx="-1">左 1°</button><button id="center">慢速回中</button><button data-dx="1">右 1°</button><button data-dy="1">下 1°</button></div>
+  <div class="servo-speed"><label for="manual-speed">手动速度</label><output id="speed-value" for="manual-speed">等待读取</output></div>
+  <input id="manual-speed" type="range" step="1" disabled>
+  <div class="pad"><button data-dy="-1">上 1°</button><button data-dx="-1">左 1°</button><button id="center">回中</button><button data-dx="1">右 1°</button><button data-dy="1">下 1°</button></div>
+  <details open><summary>舵机中位校准</summary>
+    <p>将底座放平，在正前方与头部同高处放一个标记。先回中，再用 1° 按钮对准标记，停稳后保存。</p>
+    <p id="center-offsets">等待读取机器人中位</p>
+    <div class="row"><button id="save-center" disabled>设为正中</button><button id="reset-center" disabled>恢复出厂中位</button></div>
+    <output id="center-result" aria-live="polite"></output>
+  </details>
   <button id="test">让小智看向选中的点</button><hr>
 <details open><summary>三维底座标定</summary><p>标记平放，印刷上边代表前方。偏移从标记中心量至转轴，单位为毫米。</p><div class="grid">
 <label>标记 ID<input id="marker" type="number" min="0" max="49" value="0"></label><label>黑边边长 mm<input id="size" type="number" value="80"></label>

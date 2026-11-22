@@ -138,14 +138,6 @@
         color: var(--green);
         font-size: 13px;
       }
-      #manual-speed {
-        padding: 6px 10px;
-        font: inherit;
-        color: inherit;
-        background: inherit;
-        border: 1px solid var(--line);
-        border-radius: 7px;
-      }
       .viewport {
         position: relative;
         height: 128px;
@@ -369,11 +361,9 @@
           </div>
           <div class="row">
             <label for="manual-speed">手动速度</label>
-            <select id="manual-speed" disabled>
-              <option value="5">5°/秒</option><option value="10" selected>10°/秒</option>
-              <option value="15">15°/秒</option><option value="20">20°/秒</option>
-            </select>
+            <output id="speed-value" for="manual-speed">—</output>
           </div>
+          <input id="manual-speed" type="range" step="1" disabled />
           <div class="pad" aria-label="头部方向">
             <button disabled data-command="up" aria-label="抬头">↑</button>
             <button disabled data-command="left" aria-label="左转">←</button>
@@ -385,6 +375,14 @@
             <span id="step" class="sub">点方向键接管舵机</span
             ><button disabled data-command="auto">恢复自动动作</button>
           </div>
+          <details id="center-tools">
+            <summary>舵机中位校准</summary>
+            <p>点回中，等头部停稳。在底座正前方、与头部同高处放一个标记，用上方方向键每次 1° 对准它。</p>
+            <p id="offsets"></p>
+            <p id="center-range"></p>
+            <button id="save-center" disabled>设为正中</button>
+            <button id="reset-center" disabled>恢复出厂中位</button>
+          </details>
         </section>
         <section class="hardware" aria-labelledby="hardware-title">
           <h2 id="hardware-title">连接的硬件</h2>
@@ -408,12 +406,15 @@
     </main>
     <script>
       const el = (id) => document.getElementById(id)
+      const speed = el('manual-speed')
       const buttons = [...document.querySelectorAll('[data-command]')]
       let state,
         online = false,
         sending = false,
         reading,
-        editingVolume = false
+        editingVolume = false,
+        editingSpeed = false,
+        pendingSpeed = null
 
       function updateControls() {
         const locked = !online || sending
@@ -427,7 +428,10 @@
             }
           : {}
         for (const button of buttons) button.disabled = locked || !!limits[button.dataset.command]
-        el('manual-speed').disabled = locked || state?.manualSpeed == null
+        speed.disabled = !online || state?.manualSpeed == null
+        const canCalibrate = !locked && state.mode === 'manual' && !state.moving
+        el('save-center').disabled = !canCalibrate
+        el('reset-center').disabled = !canCalibrate || !(state.centerOffsetX || state.centerOffsetY)
         el('volume').disabled = locked
         el('gesture').disabled = locked || state?.gesture == null
       }
@@ -438,13 +442,20 @@
         el('connection').className = 'online'
         el('connection').textContent = '设备在线'
         el('mode').textContent = ({manual:'手动控制中',follow:'视觉跟随中',auto:'自动动作中'})[state.mode]
-        el('step').textContent = state.moving ? (state.targetX === 90 && state.targetY === 90 ? '慢速回中中' : '慢速移动中') : '每次移动 ' + state.step + '°'
+        el('step').textContent = state.moving ? (state.targetX === 90 && state.targetY === 90 ? '正在回中' : '移动中') : '每次移动 ' + (el('center-tools').open ? 1 : state.step) + '°'
+        el('offsets').textContent = '已保存偏移：水平 ' + state.centerOffsetX + '°，俯仰 ' + state.centerOffsetY + '°'
+        el('center-range').textContent = '从正中可转：左 ' + (90-state.minX) + '°，右 ' + (state.maxX-90) + '°，上 ' + (90-state.minY) + '°，下 ' + (state.maxY-90) + '°'
         for (const axis of ['x', 'y']) el(axis).textContent = state[axis] + '°' + (state.moving ? ' → ' + Math.round(state[axis === 'x' ? 'targetX' : 'targetY']) + '°' : '')
         const marker = el('marker')
         marker.hidden = false
         marker.style.left = ((state.x - state.minX) * 100) / (state.maxX - state.minX) + '%'
         marker.style.top = ((state.y - state.minY) * 100) / (state.maxY - state.minY) + '%'
-        el('manual-speed').value = state.manualSpeed ?? ''
+        if (!editingSpeed && pendingSpeed === null) {
+          speed.min = state.manualSpeedMin
+          speed.max = state.manualSpeedMax
+          speed.value = state.manualSpeed
+          el('speed-value').textContent = speed.value + '°/秒'
+        }
         if (!editingVolume) {
           el('volume').value = state.volume
           el('level').textContent = state.volume + '%'
@@ -458,6 +469,9 @@
       function disconnected(message) {
         online = false
         editingVolume = false
+        editingSpeed = false
+        pendingSpeed = null
+        el('speed-value').textContent = '—'
         el('connection').className = ''
         el('connection').textContent = '设备离线'
         el('mode').textContent = '等待读取'
@@ -486,7 +500,7 @@
         }
       }
 
-      async function send(command, path = '/api/control') {
+      async function send(command, path = '/api/control', invalidMessage = '请检查角度。每轴中位修正范围为 ±15°。') {
         if (!online || sending) return
         if (reading) {
           reading.abort()
@@ -503,6 +517,11 @@
             body: command,
             signal: controller.signal,
           })
+          if (path === '/api/follow' && (response.status === 400 || response.status === 409)) {
+            el('message').textContent = response.status === 409 ? '控制状态已变化，请在手动模式下等到位后重试。' : invalidMessage
+            render(state)
+            return
+          }
           if (!response.ok) throw Error()
           render(await response.json())
           el('message').textContent = ''
@@ -512,13 +531,43 @@
           clearTimeout(timer)
           sending = false
           updateControls()
+          flushSpeed()
         }
       }
 
-      for (const button of buttons) button.onclick = () => send(button.dataset.command)
+      for (const button of buttons) button.onclick = () => {
+        const command = button.dataset.command
+        const deltas = {up:[0,-1], down:[0,1], left:[-1,0], right:[1,0]}
+        if (el('center-tools').open && deltas[command]) {
+          const [dx,dy] = deltas[command]
+          const x = Math.max(state.minX, Math.min(state.maxX, Math.round(state.targetX)+dx))
+          const y = Math.max(state.minY, Math.min(state.maxY, Math.round(state.targetY)+dy))
+          send(JSON.stringify({op:'manual', x, y}), '/api/follow')
+        } else send(command)
+      }
+      for (const [button, op] of [['save-center','save_center'], ['reset-center','reset_center']])
+        el(button).onclick = () => send(JSON.stringify({op, boot:state.boot, generation:state.generation}), '/api/follow')
       el('gesture').onclick = () => send(state.gesture ? 'gesture=off' : 'gesture=on')
-      el('manual-speed').onchange = (event) =>
-        send(JSON.stringify({op: 'speed', value: Number(event.target.value)}), '/api/follow')
+      function flushSpeed() {
+        if (!online || sending || pendingSpeed === null) return
+        const value = pendingSpeed
+        pendingSpeed = null
+        send(JSON.stringify({op: 'speed', value}), '/api/follow', '速度超出设备支持的范围。')
+      }
+      speed.oninput = () => {
+        editingSpeed = true
+        el('speed-value').textContent = speed.value + '°/秒'
+      }
+      speed.onchange = () => {
+        editingSpeed = false
+        pendingSpeed = Number(speed.value)
+        flushSpeed()
+      }
+      speed.onpointercancel = speed.onblur = () => {
+        if (!editingSpeed) return
+        editingSpeed = false
+        if (online) render(state)
+      }
       el('volume').oninput = (event) => {
         editingVolume = true
         el('level').textContent = event.target.value + '%'

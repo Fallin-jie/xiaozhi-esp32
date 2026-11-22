@@ -12,7 +12,7 @@ if not exist "%runner%" (
         py -3 -m venv "%venv%" || goto :failed
     )
 )
-"%runner%" -c "import cv2, flask, numpy, pyrealsense2 as rs; assert flask.Request.max_content_length.fset and hasattr(cv2.aruco,'ArucoDetector') and hasattr(cv2,'FaceRecognizerSF') and hasattr(rs,'align')" 2>nul
+"%runner%" -c "import av, cv2, flask, numpy, pythoncom, win32com.client, pyrealsense2 as rs; assert flask.Request.max_content_length.fset and hasattr(cv2.aruco,'ArucoDetector') and hasattr(cv2,'FaceRecognizerSF') and hasattr(rs,'align')" 2>nul
 if errorlevel 1 (
     "%runner%" -m pip install -r requirements.txt || goto :failed
 )

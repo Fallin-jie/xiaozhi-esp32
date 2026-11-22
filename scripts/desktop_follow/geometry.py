@@ -91,7 +91,7 @@ def marker_pose(frame, options):
     return dict(axes=axes.tolist(), pivot=pivot.tolist(), rms=rms, options=options)
 
 
-def draw_axes(image, frame, pose):
+def draw_axes(image, frame, pose, mirror=False):
     if not pose or frame["K"] is None:
         return
     axes, origin = np.array(pose["axes"]), np.array(pose["pivot"])
@@ -100,12 +100,15 @@ def draw_axes(image, frame, pose):
     if np.min(xyz[:, 2]) <= .01:
         return
     uv = cv2.projectPoints(xyz, np.zeros(3), np.zeros(3), frame["K"], frame["dist"])[0].astype(int).reshape(4, 2)
+    if mirror:
+        uv[:, 0] = image.shape[1] - 1 - uv[:, 0]
     for p, label, color in zip(uv[1:], ("R", "F", "U"), ((60,100,255),(80,235,150),(255,175,65))):
         cv2.arrowedLine(image, uv[0], p, color, 2)
         cv2.putText(image, label, p, 0, .65, color, 2)
 
 
-def aim(frame, profile, uv, depth):
+def aim(frame, profile, uv, depth, *, camera_direction=False, robot=None):
+    robot = robot or {}
     pose = profile.get("pose")
     trim = profile.get("trim", [0, 0])
     if pose and depth is not None and frame["K"] is not None:
@@ -120,9 +123,22 @@ def aim(frame, profile, uv, depth):
     else:
         region = next((r for r in reversed(list(profile.get("regions", {}).values()))
                        if r.get("matrix") and in_rect(uv, r["rect"])), None)
-        if not region:
+        if region:
+            angles = np.array([*uv, 1.]) @ region["matrix"]
+            angles -= [robot.get("centerOffsetX", 0), robot.get("centerOffsetY", 0)]
+            method = "二维"
+        elif camera_direction and not pose and not profile.get("regions") and frame["K"] is not None:
+            # The D405 frames are rectified. Assume a fixed camera facing the same way as the centered head.
+            h, w = frame["bgr"].shape[:2]
+            K = frame["K"]
+            right = (uv[0] * (w-1) - K[0, 2]) / K[0, 0]
+            down = (uv[1] * (h-1) - K[1, 2]) / K[1, 1]
+            # Horizontal commands increase toward the right of the mirrored preview.
+            angles = [90 - math.degrees(math.atan(right)),
+                      90 + math.degrees(math.atan2(down, math.hypot(1, right)))]
+            method = "画面方向（估算）"
+        else:
             return None, "保持", False
-        angles = np.array([*uv, 1.]) @ region["matrix"]
-        method = "二维"
-    bounds = np.clip(angles, [50, 70], [130, 110])
+    bounds = np.clip(angles, [robot.get("minX",50), robot.get("minY",70)],
+                             [robot.get("maxX",130), robot.get("maxY",110)])
     return [int(round(a)) for a in bounds], method, bool(np.any(bounds != angles))

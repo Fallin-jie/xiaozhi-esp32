@@ -2,12 +2,29 @@ import ipaddress
 import json
 import secrets
 import time
+from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.request import Request, ProxyHandler, build_opener
 
 
+def play_voice(address, boot, request_id, kind, clip):
+    headers = {"Content-Type": "application/octet-stream", "Connection": "close", "X-Desk-Control": "1",
+               "X-Voice-Boot": str(boot), "X-Voice-Request": str(request_id), "X-Voice-Kind": kind}
+    req = Request(f"http://{address}/api/voice", clip, headers)
+    try:
+        with build_opener(ProxyHandler({})).open(req, timeout=4) as response:
+            if json.load(response).get("accepted") is not True:
+                raise ValueError("机器人未确认播放")
+    except HTTPError as exc:
+        if exc.code == 409:
+            raise ValueError("机器人正在讲话或刚刚重启，请稍后再试") from exc
+        raise ValueError(f"机器人拒绝播放（HTTP {exc.code}）") from exc
+    except (OSError, HTTPException) as exc:
+        raise ValueError("未收到机器人播放确认，请检查连接") from exc
+
+
 class Robot:
-    """Accessed under the service lock. A network failure always disarms local tracking."""
+    """Accessed under the service lock. Motion transport failures disarm local tracking."""
     def __init__(self):
         self.address = ""
         self.state = {}
@@ -17,20 +34,31 @@ class Robot:
         self.sent = 0
         self.http = build_opener(ProxyHandler({}))
 
-    def call(self, op=None, **values):
-        if not self.address:
-            raise ValueError("请先连接机器人")
+    def _request(self, op, values):
         data = json.dumps(dict(op=op, **values)).encode() if op else None
         url = "http://" + self.address + ("/api/follow" if op else "/api/state")
         req = Request(url, data, {"X-Desk-Control":"1", "Content-Type":"application/json", "Connection":"close"})
+        with self.http.open(req, timeout=.85) as response:
+            return json.load(response)
+
+    def announce_visitor(self, request_id):
+        # A failed sound request must not release an active servo session.
         try:
-            with self.http.open(req, timeout=.85) as response:
-                result = json.load(response)
+            result = self._request("visitor_alert", {"boot": self.state["boot"], "request": request_id})
+        except (OSError, HTTPException, ValueError):
+            return False
+        return result.get("robot") == self.state["robot"] and result.get("visitorAlert") == request_id
+
+    def call(self, op=None, **values):
+        if not self.address:
+            raise ValueError("请先连接机器人")
+        try:
+            result = self._request(op, values)
         except HTTPError as exc:
             self.session = None
             self.reason = "控制权已切换，请重新开启跟随" if exc.code == 409 else f"固件返回 HTTP {exc.code}"
             raise ValueError(self.reason) from exc
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, HTTPException) as exc:
             self.session = None
             self.reason = "机器人离线，请检查地址和 Wi-Fi"
             self.state = {}

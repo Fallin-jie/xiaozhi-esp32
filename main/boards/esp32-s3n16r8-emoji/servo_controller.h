@@ -61,11 +61,15 @@ public:
         uint32_t boot, generation;
         bool moving;
         int manual_speed;
+        int offset_x, offset_y, min_x, max_x, min_y, max_y;
     };
     enum class ManualMove { Left, Right, Up, Down, Center };
     static constexpr int kManualStep = 5;
     static constexpr int kDefaultSpeed = 10;
+    static constexpr int kMinManualSpeed = 1;
+    static constexpr int kMaxManualSpeed = 120;
     bool SetManualSpeed(int degrees_per_second);
+    esp_err_t CalibrateCenter(bool reset, uint32_t boot, uint32_t generation);
 
     Position GetPosition() const;
     void MoveManually(ManualMove move);
@@ -161,11 +165,13 @@ private:
     size_t first_ = 0, count_ = 0;
     float speed_ = 0;
     int manual_speed_ = kDefaultSpeed;
+    int offset_x_ = 0, offset_y_ = 0;
     int64_t last_tick_ = 0, deadline_ = 0;
     uint32_t boot_ = 0, epoch_ = 1, session_ = 0, request_ = 0, seq_ = 0;
     esp_timer_handle_t timer_ = nullptr;
     static thread_local uint32_t scope_;
-    static void WriteAngle(int channel, float angle);
+    void WriteAngle(int channel, float angle);
+    static Angles Limit(Angles point);
     void Tick();
     void Switch(Mode mode);
     void Expire(int64_t now);
