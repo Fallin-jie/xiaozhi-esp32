@@ -11,6 +11,9 @@ from robot import Robot
 import cv2
 import numpy as np
 
+from camera import color_geometry, select_camera
+import pyrealsense2 as rs
+
 from geometry import aim, fit_samples, marker_pose, measure
 from service import Service
 from app import create_app
@@ -29,6 +32,25 @@ def frame():
 
 
 class FollowTests(unittest.TestCase):
+    def test_d405_selection(self):
+        devices = [dict(model="RealSense D405", serial=sn) for sn in ("A", "B")]
+        self.assertEqual(select_camera(devices[:1], ""), devices[0])
+        self.assertEqual(select_camera(devices, "B"), devices[1])
+        for choices, serial in (([], ""), (devices, ""), (devices, "missing")):
+            with self.assertRaises(ValueError):
+                select_camera(choices, serial)
+
+    def test_d405_rectified_pixels_follow_sdk_rays(self):
+        intr = rs.intrinsics()
+        intr.width, intr.height = 32, 24
+        intr.fx, intr.fy, intr.ppx, intr.ppy = 22., 23., 15., 12.
+        intr.model = rs.distortion.inverse_brown_conrady
+        intr.coeffs = [-.05, .06, .0003, .0015, -.022]
+        K, pixels = color_geometry(intr)
+        for u, v in ((1, 1), (15, 12), (30, 22)):
+            ray = rs.rs2_deproject_pixel_to_point(intr, pixels[v, u].tolist(), 1.)
+            np.testing.assert_allclose(K @ ray, [u, v, 1.], atol=.001)
+
     def test_owner_visitor_hold(self):
         t = Tracker()
         owner = [[1.,0.]]
@@ -80,7 +102,8 @@ class FollowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fit_samples([expected[0]]*5)
         p = dict(regions={"seat":dict(rect=[.1,.1,.9,.9],matrix=matrix)})
-        self.assertEqual(aim(f,p,[.25,.75],None),([70,92],"二维",False))
+        # Avoid a half-degree tie after the floating-point least-squares fit.
+        self.assertEqual(aim(f,p,[.25,.76],None),([70,92],"二维",False))
         self.assertIsNone(aim(f,p,[0,0],None)[0])
         p["pose"] = dict(axes=[[1,0,0],[0,0,-1],[0,1,0]],pivot=[-.2,0,0])
         near=aim(f,p,[.5,.5],1)
@@ -159,6 +182,19 @@ class FollowTests(unittest.TestCase):
             call.assert_called_with("manual", x=93, y=87)
             self.assertEqual(submit({"center":True}).status_code, 200)
             call.assert_called_with("manual", x=90, y=90)
+
+    def test_lan_access_is_opt_in_and_control_guard_is_preserved(self):
+        lan_ip = "10.100.10.4"
+        url = f"http://{lan_ip}:8765"
+        peer = {"REMOTE_ADDR": "10.100.2.20"}
+        self.assertEqual(create_app(None).test_client().get("/", base_url=url, environ_overrides=peer).status_code, 403)
+        client = create_app(None, lan_ip).test_client()
+        with client.get("/", base_url=url, environ_overrides=peer) as response:
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.get("/", base_url="http://localhost", environ_overrides=peer).status_code, 403)
+        self.assertEqual(client.get("/", base_url="http://unknown.test", environ_overrides=peer).status_code, 403)
+        self.assertEqual(client.get("/", base_url=url, environ_overrides={"REMOTE_ADDR": "203.0.113.1"}).status_code, 403)
+        self.assertEqual(client.post("/api/start", base_url=url, environ_overrides=peer, json={}).status_code, 403)
 
     def test_web_freeze_profile_and_expiry(self):
         with tempfile.TemporaryDirectory() as directory:

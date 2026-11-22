@@ -24,7 +24,7 @@ class Service:
         self.robot = Robot()
         self.robot.address = self.config.get("address", "")
         self.tracker = Tracker()
-        self.camera_status = "正在检测海康相机"
+        self.camera_status = "正在检测 RealSense D405"
         self.model_error = ""
         self.devices = []
         self.epoch = self.counter = 0
@@ -53,12 +53,12 @@ class Service:
                 self.process.terminate()
                 self.process.join(2)
             self.frames.close()
-        self.config["serial"] = serial
+        self.config["d405_serial"] = serial
         ctx = mp.get_context("spawn")
         self.frames, self.stop_camera = ctx.Queue(1), ctx.Event()
         self.process = ctx.Process(target=worker, args=(serial, self.frames, self.stop_camera), daemon=True)
         self.process.start()
-        self.camera_status = "正在检测海康相机"
+        self.camera_status = "正在检测 RealSense D405"
 
     def reset(self):
         self.epoch += 1
@@ -68,7 +68,7 @@ class Service:
 
     def start(self):
         with self.lock:
-            self.change_camera(self.config.get("serial", ""))
+            self.change_camera(self.config.get("d405_serial", ""))
         for target in (self.vision_loop, self.control_loop):
             threading.Thread(target=target, daemon=True).start()
 
@@ -119,13 +119,7 @@ class Service:
 
     def process_frame(self, f, detections):
         robot_id = self.robot.state.get("robot")
-        modes = list(f["modes"])
-        if modes[-1] is None and self.history:
-            prev = self.history[-1]["frame"]
-            if prev["serial"] == f["serial"] and prev["modes"][:-1] == modes[:-1]:
-                modes[-1] = prev["modes"][-1]
-        f["modes"] = modes
-        key = json.dumps([f["serial"], modes, robot_id]) if robot_id else None
+        key = json.dumps([f["serial"], f["modes"], robot_id]) if robot_id else None
         if self.profile_key != key:
             self.robot.stop("设备或模式改变，请重新开启")
             self.reset()
@@ -175,7 +169,7 @@ class Service:
         snap = self.latest()
         p = self.profile()
         return dict(camera=self.camera_status if snap or not self.history else "彩色帧已过期",
-                    devices=self.devices, serial=self.config.get("serial", ""), model_error=self.model_error,
+                    devices=self.devices, serial=self.config.get("d405_serial", ""), model_error=self.model_error,
                     address=self.robot.address, robot=self.robot.state, reason=self.robot.reason,
                     active=bool(self.robot.session), owner=len(self.config.get("owner", [])),
                     profile=bool(self.profile_key), roi=p.get("roi"), range=p.get("range"), trim=p.get("trim", [0,0]),
@@ -193,7 +187,7 @@ class Service:
         h, w = image.shape[:2]
         if overlay and f["z"] is not None:
             z = f["z"]
-            col = cv2.applyColorMap(np.uint8(np.clip(z * 55, 0, 255)), cv2.COLORMAP_TURBO)
+            col = cv2.applyColorMap(np.uint8(np.clip((z - .07) * (255 / (.50 - .07)), 0, 255)), cv2.COLORMAP_TURBO)
             mask = z > 0
             image[mask] = cv2.addWeighted(image, .48, col, .52, 0)[mask]
         p = self.profile()

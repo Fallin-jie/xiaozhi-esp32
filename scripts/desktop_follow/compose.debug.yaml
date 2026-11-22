@@ -1,0 +1,12 @@
+services:
+  chat-debug:
+    image: ${XIAOZHI_SERVER_IMAGE:-ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest}
+    restart: unless-stopped
+    entrypoint: ["python", "-B", "/run/chat_bridge.py"]
+    environment:
+      DEBUG_DEVICE_MAC: ${DEBUG_DEVICE_MAC:?Set the bound device MAC in .env}
+    ports:
+      - "127.0.0.1:18765:18765"
+    volumes:
+      - ./data/.config.yaml:/run/xiaozhi-config.yaml:ro
+      - ${DEBUG_BRIDGE_FILE:?Set the path to chat_bridge.py in .env}:/run/chat_bridge.py:ro

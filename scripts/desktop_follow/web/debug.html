@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>大模型调试 · 云台小智</title>
+  <link rel="stylesheet" href="/assets/style.css"><link rel="stylesheet" href="/assets/debug.css">
+  <script defer src="/assets/debug.js"></script>
+</head>
+<body>
+  <header><div class="brand"><span class="mark" aria-hidden="true">◎</span><strong>云台小智</strong></div><span class="divider"></span><a href="/">返回视觉控制台</a></header>
+  <main class="debug">
+    <div class="heading"><div><h1>大模型调试</h1><p>使用这块板子在智控台绑定的模型和角色进行文字对话。</p></div><button type="button" id="reset" disabled>新对话</button></div>
+    <section class="chat" aria-label="模型对话">
+      <div class="bar"><span>当前模型</span><strong id="model">正在读取…</strong></div>
+      <div class="transcript" role="log" aria-label="对话记录" aria-live="polite" tabindex="0"><p id="empty-chat">输入第一条消息，开始调试。</p></div>
+      <form id="composer"><label for="prompt">消息</label>
+        <textarea id="prompt" required maxlength="2000" rows="3" placeholder="想和小智说什么？"></textarea>
+        <div class="actions"><small>Enter 发送 · Shift + Enter 换行</small><button class="primary" id="send" disabled>发送</button></div>
+        <output id="status" aria-live="polite"></output>
+      </form>
+    </section>
+    <p class="scope">使用远程模型时，消息会发给对应的模型服务。对话记录仅在当前页面保留，最近 8 轮用于追问。</p>
+  </main>
+</body>
+</html>

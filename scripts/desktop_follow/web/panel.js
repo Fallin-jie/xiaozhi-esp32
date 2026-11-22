@@ -115,7 +115,7 @@ function render(s) {
   const key=JSON.stringify([s.devices,s.serial]);
   if (key !== deviceKey) {
     deviceKey=key;
-    $('serial').replaceChildren(new Option('自动选择 MV-EB435i',''), ...s.devices.map(d=>new Option(d.model+' · '+d.serial,d.serial)));
+    $('serial').replaceChildren(new Option('自动选择 RealSense D405',''), ...s.devices.map(d=>new Option(d.model+' · '+d.serial,d.serial)));
     if (s.serial && !s.devices.some(d=>d.serial===s.serial)) $('serial').add(new Option(s.serial,s.serial));
     $('serial').value=s.serial;
   }
@@ -243,3 +243,16 @@ action('clear_region','clear_region',()=>({name:$('name').value}),'区域已清�
 action('sample','sample',()=>({...frameData(),name:$('name').value}),'采样点已保存');
 action('check','check',()=>({...frameData(),truth:Number($('truth').value)}),'核验结果已记录');
 refresh();setInterval(refresh,350);
+
+// Older running consoles already serve the updated static files, but lack /debug.
+// Use the standalone chat listener until the visual console is restarted.
+const chatLink = document.querySelector('a[href="/debug"]');
+if (chatLink) {
+  fetch('/debug', {method: 'HEAD'}).then(response => {
+    if (response.status === 404) {
+      const standalone = new URL('/debug', window.location.href);
+      standalone.port = '8766';
+      chatLink.href = standalone.href;
+    }
+  }).catch(() => {});
+}

@@ -1,15 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>云台小智 · 视觉跟随</title><link rel="stylesheet" href="/assets/style.css"><script defer src="/assets/panel.js"></script></head>
-<body><header><div class="brand"><span class="mark" aria-hidden="true">◎</span><strong>云台小智</strong></div><span class="divider"></span><span>视觉控制台</span><span class="device">MV-EB435i</span></header>
+<body><header><div class="brand"><span class="mark" aria-hidden="true">◎</span><strong>云台小智</strong></div><span class="divider"></span><span>视觉控制台</span><a href="/debug">大模型调试</a><span class="device">RealSense D405</span></header>
 <main><div class="heading"><div><h1>视觉跟随</h1><p id="connection">正在读取设备状态…</p></div><button id="follow" class="primary">开启跟随</button></div>
 <div class="layout"><section class="preview"><div class="bar"><h2>相机画面</h2><div><select id="view" aria-label="预览模式"><option value="0">彩色</option><option value="1">深度叠加</option></select><button id="freeze">定格</button></div></div>
-<div id="stage"><div id="empty"><span aria-hidden="true">⊙</span><strong>等待相机画面</strong><small>连接 USB 相机后自动显示预览</small></div><div id="plane" hidden><img id="image" draggable="false" alt="海康实时预览"><i id="pick" hidden></i><i id="rubber" hidden></i></div></div>
+<div id="stage"><div id="empty"><span aria-hidden="true">⊙</span><strong>等待相机画面</strong><small>连接 USB 相机后自动显示预览</small></div><div id="plane" hidden><img id="image" draggable="false" alt="D405 实时预览"><i id="pick" hidden></i><i id="rubber" hidden></i></div></div>
 <div class="metrics"><div><small>画面目标</small><b id="subject">—</b></div><div><small>定位方式</small><b id="method">—</b></div><div><small>舵机指令角</small><b id="position">—</b></div></div>
 <div class="below"><span id="measure">点击画面取点测距，拖动可框选区域。</span><output id="message" aria-live="polite"></output></div></section>
 <aside><nav aria-label="控制页签"><button data-tab="setup" class="active">设备与跟随</button><button data-tab="cal">位置标定</button></nav>
 <div id="setup" class="tab"><h3>设备连接</h3><label>机器人局域网 IP<div class="row"><input id="address" placeholder="192.168.31.67" inputmode="decimal"><button id="connect">连接</button></div></label>
-<label>相机序列号<div class="row"><select id="serial"><option value="">自动选择 MV-EB435i</option></select><button id="camera">重连</button></div></label><p id="stream"></p><hr>
+<label>相机序列号<div class="row"><select id="serial"><option value="">自动选择 RealSense D405</option></select><button id="camera">重连</button></div></label><p id="stream"></p><hr>
 <h3>主人与提醒区域</h3><p>定格画面，点选自己的身体框，分别录入正脸和轻微侧脸。</p><div class="row"><button id="enroll">录入选中的人</button><button id="delete_owner">清除主人</button></div><p id="owner"></p>
 <div class="row"><button id="roi">使用框选区域</button><button id="whole">全画面提醒</button></div><label>提醒距离（米，可选）<div class="row"><input id="near" type="number" step=".1" min=".01" placeholder="近界"><input id="far" type="number" step=".1" min=".01" placeholder="远界"><button id="range">保存</button></div></label><p id="gate"></p></div>
 <div id="cal" class="tab" hidden>
